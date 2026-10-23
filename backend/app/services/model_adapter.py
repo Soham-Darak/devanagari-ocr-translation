@@ -30,7 +30,7 @@ DEVANAGARI_BY_SUFFIX = {
     "daa": "ड",
     "dhaa": "ढ",
     "adna": "ण",
-    "ta": "त",
+    "tabala": "त",
     "tha": "थ",
     "da": "द",
     "dha": "ध",
@@ -40,15 +40,15 @@ DEVANAGARI_BY_SUFFIX = {
     "ba": "ब",
     "bha": "भ",
     "ma": "म",
-    "ya": "य",
+    "yaw": "य",
     "ra": "र",
     "la": "ल",
-    "va": "व",
-    "sha": "श",
-    "shha": "ष",
-    "sa": "स",
+    "waw": "व",
+    "motosaw": "श",
+    "petchiryakha": "ष",
+    "patalosaw": "स",
     "ha": "ह",
-    "kshya": "क्ष",
+    "chhya": "क्ष",
     "tra": "त्र",
     "gya": "ज्ञ",
     **{f"digit_{i}": chr(0x0966 + i) for i in range(10)},
@@ -124,36 +124,28 @@ def devanagari_label_for(class_name: str) -> str | None:
 
 
 def preprocess_character(image: Image.Image) -> torch.Tensor:
-    """Apply the notebook's character-image preprocessing."""
+    """Match the CNN notebook's deterministic evaluation transforms.
+
+    The CNN was trained on DHCD (white characters on black background).
+    If the input image has a light background (paper scan with dark ink),
+    invert it so the background is dark and strokes are bright.
+    """
     image = image.convert("L")
-    image = ImageOps.invert(image)
-    image = ImageOps.autocontrast(image, cutoff=2)
+    pixels = np.asarray(image, dtype=np.float32)
 
-    image_array = np.asarray(image)
-    threshold = float(image_array.mean() + image_array.std())
-    coordinates = np.argwhere(image_array > threshold)
+    # Invert light backgrounds (e.g., ink on white paper)
+    if pixels.mean() > 127:
+        pixels = 255.0 - pixels
 
-    if coordinates.size:
-        y0, x0 = coordinates.min(axis=0)
-        y1, x1 = coordinates.max(axis=0)
+    if image.size != (32, 32):
+        inv_img = Image.fromarray(pixels.astype(np.uint8))
+        inv_img = inv_img.resize((32, 32), Image.Resampling.BILINEAR)
+        pixels = np.asarray(inv_img, dtype=np.float32)
 
-        padding = 15
-        y0 = max(0, int(y0) - padding)
-        x0 = max(0, int(x0) - padding)
-        y1 = min(image_array.shape[0], int(y1) + padding)
-        x1 = min(image_array.shape[1], int(x1) + padding)
-
-        if y1 > y0 and x1 > x0:
-            image = image.crop((x0, y0, x1, y1))
-
-    image = ImageOps.autocontrast(image, cutoff=5)
-    image = image.resize((32, 32), Image.Resampling.BILINEAR)
-
-    pixels = np.asarray(image, dtype=np.float32) / 255.0
+    pixels = pixels / 255.0
     pixels = (pixels - 0.5) / 0.5
 
     return torch.from_numpy(pixels).unsqueeze(0).unsqueeze(0)
-
 
 class CharacterClassifier:
     """Loads the real trained checkpoint once and predicts one character."""

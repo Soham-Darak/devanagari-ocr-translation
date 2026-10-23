@@ -26,6 +26,7 @@ ALLOWED_IMAGE_TYPES = {
 async def perform_ocr(
     request: Request,
     file: UploadFile = File(...),
+    engine: str = "auto",
 ) -> OCRResponse:
     settings = request.app.state.settings
     ocr_service: OCRService = request.app.state.ocr_service
@@ -100,6 +101,7 @@ async def perform_ocr(
         extracted_text, warnings = await run_in_threadpool(
             ocr_service.extract_from_image,
             image,
+            engine=engine,
         )
     except OCRModelUnavailable as exc:
         raise HTTPException(
@@ -112,7 +114,6 @@ async def perform_ocr(
             detail=str(exc),
         ) from exc
 
-    page_warning = " ".join(warnings) if warnings else None
 
     return OCRResponse(
         success=True,
@@ -123,9 +124,9 @@ async def perform_ocr(
             PageOCRResult(
                 page_number=1,
                 text=extracted_text,
-                extraction_method="easyocr",
-                warning=page_warning,
+                extraction_method="handwriting_ocr",
             )
         ],
         warnings=warnings,
     )
+

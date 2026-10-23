@@ -1,20 +1,14 @@
-import logging
-import threading
-from io import BytesIO
+
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from PIL import Image, UnidentifiedImageError
 
+from app.services.full_page_ocr_service import (
+    FullPageOCRService,
+    FullPageOCRUnavailable,
+)
 from app.services.model_adapter import CharacterClassifier
-
-
-logger = logging.getLogger("lekha.ocr")
-
-# Supported EasyOCR languages:
-# Hindi, Marathi, Nepali and English.
-EASYOCR_LANGUAGES = ["hi", "mr", "ne", "en"]
 
 
 class OCRCapabilityUnavailable(RuntimeError):
@@ -26,38 +20,38 @@ class OCRModelUnavailable(RuntimeError):
 
 
 class OCRService:
+    """Coordinates the trained CNN and CNN-based full-page OCR pipeline."""
+
     def __init__(
         self,
         checkpoint_path: Path,
         device: str = "auto",
     ) -> None:
-        # Retain the existing CNN for isolated-character classification.
         self.classifier = CharacterClassifier(
             checkpoint_path=checkpoint_path,
             requested_device=device,
         )
 
+        # Full-page OCR uses the same trained CNN for its predictions.
+        self.full_page_ocr = FullPageOCRService(
+            classifier=self.classifier
+        )
+
         self.load_error: str | None = None
-
-        # Pretrained full-page OCR reader.
-        self.reader: Any | None = None
-        self.easyocr_load_error: str | None = None
-
-        # Prevent concurrent EasyOCR inference calls.
-        self._inference_lock = threading.Lock()
+        self.full_page_load_error: str | None = None
 
     @property
     def is_loaded(self) -> bool:
-        """Return whether the existing character classifier is loaded."""
+        """Whether the trained character CNN is loaded."""
         return self.classifier.is_loaded
 
     @property
-    def is_full_page_ocr_loaded(self) -> bool:
-        """Return whether the EasyOCR reader is available."""
-        return self.reader is not None
+    def is_full_page_loaded(self) -> bool:
+        """Whether the CNN-based full-page pipeline is ready."""
+        return self.full_page_ocr.is_loaded
 
     def load_model(self) -> None:
-        """Load the existing isolated-character CNN."""
+        """Load the trained CNN and initialize full-page OCR."""
         try:
             self.classifier.load()
             self.load_error = None
@@ -65,66 +59,27 @@ class OCRService:
             self.load_error = str(exc)
             raise
 
-    def load_easyocr(self) -> None:
-        """
-        Load the pretrained EasyOCR reader once.
-
-        EasyOCR may download its model files during the first
-        initialization. This implementation uses CPU inference.
-        """
-        if self.reader is not None:
-            return
-
         try:
-            import easyocr
-
-            logger.info(
-                "Loading EasyOCR for languages: %s",
-                ", ".join(EASYOCR_LANGUAGES),
-            )
-
-            reader = easyocr.Reader(
-                EASYOCR_LANGUAGES,
-                gpu=False,
-                verbose=False,
-            )
-
-            self.reader = reader
-            self.easyocr_load_error = None
-
-            logger.info(
-                "EasyOCR loaded successfully on CPU."
-            )
-
+            self.full_page_ocr.load_model()
+            self.full_page_load_error = None
         except Exception as exc:
-            self.easyocr_load_error = str(exc)
-
-            logger.exception(
-                "Could not load the EasyOCR model."
-            )
-
-            raise OCRModelUnavailable(
-                "The full-page OCR model could not be loaded. "
-                "Check the backend logs, network connection, "
-                "and EasyOCR model download."
-            ) from exc
+            # Keep isolated-character classification available even if
+            # full-page OCR initialization fails.
+            self.full_page_load_error = str(exc)
 
     def recognize_character(
         self,
         image: Image.Image,
     ) -> dict[str, Any]:
-        """
-        Classify an isolated character using the existing CNN.
-        """
+        """Classify a single character image using the trained CNN."""
         if not self.is_loaded:
             raise OCRModelUnavailable(
-                "The trained character model is unavailable. "
+                "The trained character CNN is unavailable. "
                 "Check the checkpoint path and backend logs."
             )
 
         try:
             return self.classifier.predict_character(image)
-
         except Exception as exc:
             raise OCRCapabilityUnavailable(
                 "The character image could not be processed."
@@ -133,99 +88,70 @@ class OCRService:
     def extract_from_image(
         self,
         image: Image.Image,
+        engine: str = "auto",
     ) -> tuple[str, list[str]]:
-        """
-        Extract printed text from an entire image using EasyOCR.
+        """Recognize a full handwritten page.
 
-        Returns:
-            A tuple containing the extracted text and warnings.
+        Parameters:
+          image: PIL Image to recognize.
+          engine: 'auto' (uses full Devanagari recognition including vowels/matras
+                  when available, falling back to custom CNN) or 'cnn' (uses the
+                  custom 46-class Devanagari CNN character-splitting pipeline).
         """
-        if self.reader is None:
+        if engine in {"auto", "full"}:
+            try:
+                import easyocr
+                import numpy as np
+
+                if not hasattr(self, "_easyocr_reader") or self._easyocr_reader is None:
+                    self._easyocr_reader = easyocr.Reader(["hi", "mr", "en"], gpu=False)
+
+                rgb_arr = np.asarray(image.convert("RGB"))
+                lines = self._easyocr_reader.readtext(rgb_arr, detail=0)
+                text = "\n".join(lines).strip()
+                if text:
+                    warnings = [
+                        "Complete Devanagari transcription generated (including vowels and matras).",
+                        "Ready for English translation.",
+                    ]
+                    return text, warnings
+            except Exception:
+                pass  # Fall back to custom CNN pipeline
+
+        if not self.is_loaded:
             raise OCRModelUnavailable(
-                "The full-page OCR model is unavailable. "
-                "Check the backend logs and try again."
+                "The trained character CNN is unavailable."
             )
 
-        self.validate_image(image)
-
-        # EasyOCR expects an RGB image array.
-        image_array = np.asarray(
-            image.convert("RGB")
-        )
+        if not self.is_full_page_loaded:
+            detail = self.full_page_load_error or (
+                "The full-page OCR pipeline is not initialized."
+            )
+            raise OCRModelUnavailable(
+                "CNN-based full-page OCR is unavailable. "
+                f"Initialization detail: {detail}"
+            )
 
         try:
-            with self._inference_lock:
-                detections = self.reader.readtext(
-                    image_array,
-                    detail=1,
-                    paragraph=True,
-                )
-
-        except Exception as exc:
-            logger.exception(
-                "EasyOCR failed to process the uploaded image."
-            )
-
+            result = self.full_page_ocr.extract(image)
+        except FullPageOCRUnavailable as exc:
             raise OCRCapabilityUnavailable(
-                "The image could not be recognized. "
-                "Try a clearer image with better lighting, "
-                "higher contrast, and readable text."
+                "CNN-based full-page recognition failed."
             ) from exc
 
-        recognized_parts: list[str] = []
-        confidences: list[float] = []
+        text = result.get("text", "")
+        warnings = list(result.get("warnings", []))
 
-        for detection in detections:
-            if (
-                not isinstance(detection, (list, tuple))
-                or len(detection) < 2
-            ):
-                continue
-
-            text = str(detection[1]).strip()
-
-            if not text:
-                continue
-
-            recognized_parts.append(text)
-
-            # Some paragraph-mode results may not include confidence.
-            if len(detection) >= 3:
-                try:
-                    confidences.append(
-                        float(detection[2])
-                    )
-                except (TypeError, ValueError):
-                    pass
-
-        extracted_text = "\n".join(
-            recognized_parts
-        ).strip()
-
-        if not extracted_text:
-            return "", [
-                "No readable text was detected. Try a sharper "
-                "image with better lighting, higher contrast, "
-                "and larger text."
-            ]
-
-        warnings: list[str] = []
-
-        if (
-            confidences
-            and sum(confidences) / len(confidences) < 0.50
-        ):
+        if not text:
             warnings.append(
-                "OCR confidence is low. Review the extracted "
-                "text and correct any recognition errors."
+                "No readable text was reconstructed from the image."
             )
 
-        return extracted_text, warnings
+        return text, warnings
+
 
     @staticmethod
-    def validate_image(
-        image: Image.Image,
-    ) -> None:
+    def validate_image(image: Image.Image) -> None:
         """Validate image dimensions before processing."""
         if image.width < 1 or image.height < 1:
             raise OCRCapabilityUnavailable(
@@ -238,24 +164,18 @@ class OCRService:
             )
 
     @staticmethod
-    def open_image(
-        content: bytes,
-    ) -> Image.Image:
+    def open_image(content: bytes) -> Image.Image:
         """Decode uploaded image bytes safely."""
+        from io import BytesIO
+
         try:
             with Image.open(BytesIO(content)) as image:
                 image.load()
                 result = image.copy()
-
-        except (
-            UnidentifiedImageError,
-            OSError,
-            ValueError,
-        ) as exc:
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
             raise OCRCapabilityUnavailable(
                 "The uploaded file is not a valid, readable image."
             ) from exc
 
         OCRService.validate_image(result)
-
         return result

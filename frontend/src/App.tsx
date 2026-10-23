@@ -27,7 +27,7 @@ import './App.css'
 type OCRPage = {
   page_number: number
   text: string
-  extraction_method: 'embedded_text' | 'character_classifier' | 'unavailable'
+  extraction_method: 'embedded_text' | 'character_classifier' | 'handwriting_ocr' | 'unavailable'
   warning?: string | null
 }
 

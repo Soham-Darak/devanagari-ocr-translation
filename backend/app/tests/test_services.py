@@ -194,3 +194,64 @@ def test_translation_chunking_preserves_all_input_characters():
     assert len(chunks) > 1
     assert all(len(chunk) <= 4000 for chunk in chunks)
     assert "".join(chunks) == text
+
+
+def test_preprocess_character_inverts_light_background():
+    import numpy as np
+    from PIL import Image
+    from app.services.model_adapter import preprocess_character
+
+    # White background with a dark line in the middle
+    arr = np.full((50, 50), 240, dtype=np.uint8)
+    arr[20:30, :] = 20
+    img = Image.fromarray(arr)
+
+    tensor = preprocess_character(img)
+
+    assert tensor.shape == (1, 1, 32, 32)
+    # Background should now be negative (dark/black in [-1, 1] range)
+    # Top-left corner was background (240 -> inverted to 15 -> normalized near -0.88)
+    assert tensor[0, 0, 0, 0].item() < -0.5
+    # The stroke was dark (20 -> inverted to 235 -> normalized near +0.84)
+    assert tensor[0, 0, 16, 16].item() > 0.5
+
+
+def test_full_page_ocr_removes_notebook_rules():
+    import numpy as np
+    from app.services.full_page_ocr_service import FullPageOCRService
+
+    # 100x400 mask with a continuous horizontal line across the page
+    mask = np.zeros((100, 400), dtype=np.uint8)
+    mask[50, :] = 255  # Notebook rule
+    # A character-like small component
+    mask[20:35, 150:165] = 255
+
+    cleaned, rules = FullPageOCRService._remove_notebook_rules(mask)
+
+    # The rule at row 50 should be removed
+    assert cleaned[50, 200] == 0
+    assert rules[50, 200] == 255
+    # The character component should be preserved
+    assert cleaned[25, 155] == 255
+
+
+def test_full_page_ocr_word_splitting():
+    import numpy as np
+    from app.services.full_page_ocr_service import FullPageOCRService
+
+    # Create a word with a Shirorekha at the top and 2 vertical strokes below
+    word = np.zeros((40, 60), dtype=np.uint8)
+    # Shirorekha headline (top 5 rows)
+    word[5:10, 5:55] = 255
+    # First character vertical stroke (cols 15..20, rows 10..35)
+    word[10:35, 15:20] = 255
+    # Second character vertical stroke (cols 40..45, rows 10..35)
+    word[10:35, 40:45] = 255
+
+    segments = FullPageOCRService._split_word_into_characters(word)
+
+    # Should detect at least 2 character segments
+    assert len(segments) >= 2
+    assert segments[0][0] == 0
+    assert segments[-1][1] == 60
+

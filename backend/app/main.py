@@ -27,6 +27,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
 
     # Initialize the existing OCR model.
+    # Initialize OCR models.
     app.state.ocr_service = OCRService(
         checkpoint_path=settings.checkpoint_path,
         device=settings.model_device,
@@ -34,16 +35,10 @@ async def lifespan(app: FastAPI):
 
     try:
         app.state.ocr_service.load_model()
+        logger.info("OCR service initialization completed.")
     except Exception:
-        logger.exception("Character model unavailable at startup.")
-
-    try:
-        app.state.ocr_service.load_easyocr()
-    except Exception:
-        logger.exception(
-            "Full-page OCR is unavailable; image OCR requests will fail "
-            "until the OCR model can be loaded."
-        )
+        logger.exception("OCR service initialization failed.")
+        
 
     # Initialize the local translation model.
     app.state.translation_service = LocalTranslationService(
