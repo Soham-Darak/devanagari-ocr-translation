@@ -10,6 +10,7 @@ class PageOCRResult(BaseModel):
     extraction_method: Literal[
         "embedded_text",
         "character_classifier",
+        "easyocr",
         "unavailable",
     ]
     warning: str | None = None

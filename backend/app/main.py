@@ -34,9 +34,16 @@ async def lifespan(app: FastAPI):
 
     try:
         app.state.ocr_service.load_model()
-        logger.info("Character classification model loaded successfully.")
     except Exception:
         logger.exception("Character model unavailable at startup.")
+
+    try:
+        app.state.ocr_service.load_easyocr()
+    except Exception:
+        logger.exception(
+            "Full-page OCR is unavailable; image OCR requests will fail "
+            "until the OCR model can be loaded."
+        )
 
     # Initialize the local translation model.
     app.state.translation_service = LocalTranslationService(

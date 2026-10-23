@@ -1,5 +1,6 @@
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 
 from app.schemas.ocr import OCRResponse, PageOCRResult
 from app.services.ocr_service import (
@@ -29,7 +30,9 @@ async def perform_ocr(
     settings = request.app.state.settings
     ocr_service: OCRService = request.app.state.ocr_service
 
-    content = await file.read(settings.max_upload_size_mb * 1024 * 1024 + 1)
+    content = await file.read(
+        settings.max_upload_size_mb * 1024 * 1024 + 1
+    )
     await file.close()
 
     if not content:
@@ -79,7 +82,6 @@ async def perform_ocr(
             warnings=extraction.warnings,
         )
 
-    # Check actual image decoding rather than trusting the filename or MIME.
     try:
         image = OCRService.open_image(content)
     except OCRCapabilityUnavailable as exc:
@@ -89,15 +91,16 @@ async def perform_ocr(
         ) from exc
 
     if file.content_type and file.content_type not in ALLOWED_IMAGE_TYPES:
-        # The bytes are a readable image, but unsupported formats should
-        # not be silently accepted under an unrelated MIME type.
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Unsupported image content type.",
         )
 
     try:
-        extracted_text, warnings = ocr_service.extract_from_image(image)
+        extracted_text, warnings = await run_in_threadpool(
+            ocr_service.extract_from_image,
+            image,
+        )
     except OCRModelUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -109,6 +112,8 @@ async def perform_ocr(
             detail=str(exc),
         ) from exc
 
+    page_warning = " ".join(warnings) if warnings else None
+
     return OCRResponse(
         success=True,
         filename=filename,
@@ -118,7 +123,8 @@ async def perform_ocr(
             PageOCRResult(
                 page_number=1,
                 text=extracted_text,
-                extraction_method="character_classifier",
+                extraction_method="easyocr",
+                warning=page_warning,
             )
         ],
         warnings=warnings,
