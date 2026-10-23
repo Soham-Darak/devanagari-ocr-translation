@@ -84,3 +84,12 @@ Update this section after each meaningful change.
 - Identified the CNN architecture and input/output contract.
 - Identified the need to preserve ImageFolder class ordering.
 - Identified missing checkpoint and full-document OCR limitations.
+
+### Additional backend verification
+
+- [ ] PDF extraction tests pass.
+- [ ] Translation service tests pass.
+- [ ] Missing checkpoint test passes.
+- [ ] Expanded backend test suite passes.
+- [ ] Live Google Cloud Translation request verified.
+- [ ] Real-model inference verified.
