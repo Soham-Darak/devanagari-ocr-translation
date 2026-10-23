@@ -52,15 +52,28 @@ def test_translation_rejects_unsupported_target_language():
     assert response.status_code == 422
 
 
-def test_translation_reports_missing_credentials():
-    # This test is deterministic because the Google client is not called
-    # when the API key is absent.
+def test_translation_does_not_require_google_credentials():
+    class FakeLocalTranslationService:
+        def translate(
+            self,
+            text,
+            source_language="auto",
+            target_language="en",
+        ):
+            return {
+                "translated_text": "Hello",
+                "source_language": source_language,
+                "target_language": target_language,
+            }
+
     with TestClient(app) as client:
-        settings = app.state.settings
-        original_key = settings.google_translate_api_key
+        original_service = app.state.translation_service
+        original_key = app.state.settings.google_translate_api_key
 
         try:
-            settings.google_translate_api_key = ""
+            app.state.settings.google_translate_api_key = ""
+            app.state.translation_service = FakeLocalTranslationService()
+
             response = client.post(
                 "/api/translate",
                 json={
@@ -70,7 +83,14 @@ def test_translation_reports_missing_credentials():
                 },
             )
         finally:
-            settings.google_translate_api_key = original_key
+            app.state.translation_service = original_service
+            app.state.settings.google_translate_api_key = original_key
 
-    assert response.status_code == 503
-    assert "not configured" in response.json()["detail"]
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["success"] is True
+    assert body["original_text"] == "नमस्ते"
+    assert body["translated_text"] == "Hello"
+    assert body["source_language"] == "hi"
+    assert body["target_language"] == "en"

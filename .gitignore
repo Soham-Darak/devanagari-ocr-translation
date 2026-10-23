@@ -44,3 +44,12 @@ temp/
 
 # Local logs
 *.log
+
+# Local translation experiments and environments
+translation-env/
+test_nllb.py
+test_indictrans.py
+
+# Hugging Face local model cache
+.cache/
+huggingface_cache/

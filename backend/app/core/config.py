@@ -17,32 +17,50 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    # Application settings
     app_name: str = "Lekha API"
     app_env: str = "development"
     api_prefix: str = "/api"
 
+    # Frontend CORS configuration
     frontend_origin: str = "http://localhost:5173"
 
+    # Devanagari OCR model configuration
     model_checkpoint: str = "./models/devanagari_cnn_best.pth"
     model_device: str = "auto"
 
+    # Local NLLB translation model configuration
+    translation_model_name: str = "facebook/nllb-200-distilled-600M"
+    translation_device: str = "cpu"
+
+    # Upload and PDF limits
     max_upload_size_mb: int = Field(default=10, ge=1, le=100)
     max_pdf_pages: int = Field(default=20, ge=1, le=100)
     pdf_render_dpi: int = Field(default=180, ge=72, le=300)
 
+    # Legacy Google Translation configuration
+    # Retained temporarily while migrating to local translation.
     google_translate_api_key: str = ""
     google_translate_timeout_seconds: float = Field(
-        default=20.0, gt=0, le=120
+        default=20.0,
+        gt=0,
+        le=120,
     )
+
+    # Translation input limit
     max_translation_characters: int = Field(
-        default=30000, ge=1, le=100000
+        default=30000,
+        ge=1,
+        le=100000,
     )
 
     @property
     def checkpoint_path(self) -> Path:
         path = Path(self.model_checkpoint)
+
         if not path.is_absolute():
             path = BACKEND_DIR / path
+
         return path.resolve()
 
     @property

@@ -9,6 +9,7 @@ from app.api.routes.health import router as health_router
 from app.api.routes.ocr import router as ocr_router
 from app.api.routes.translation import router as translation_router
 from app.core.config import get_settings
+from app.services.local_translation_service import LocalTranslationService
 from app.services.ocr_service import OCRService
 
 
@@ -23,8 +24,9 @@ logger = logging.getLogger("lekha")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-
     app.state.settings = settings
+
+    # Initialize the existing OCR model.
     app.state.ocr_service = OCRService(
         checkpoint_path=settings.checkpoint_path,
         device=settings.model_device,
@@ -33,8 +35,22 @@ async def lifespan(app: FastAPI):
     try:
         app.state.ocr_service.load_model()
         logger.info("Character classification model loaded successfully.")
-    except Exception as exc:
-        logger.warning("Character model unavailable at startup: %s", exc)
+    except Exception:
+        logger.exception("Character model unavailable at startup.")
+
+    # Initialize the local translation model.
+    app.state.translation_service = LocalTranslationService(
+        model_name=settings.translation_model_name,
+        device=settings.translation_device,
+        max_characters=settings.max_translation_characters,
+    )
+
+    try:
+        app.state.translation_service.load_model()
+    except Exception:
+        logger.exception(
+            "Local translation model unavailable at startup."
+        )
 
     yield
 
@@ -45,7 +61,7 @@ app = FastAPI(
     title=settings.app_name,
     description=(
         "API for Devanagari character classification, PDF text extraction, "
-        "and English translation."
+        "and local English translation."
     ),
     version="0.1.0",
     lifespan=lifespan,

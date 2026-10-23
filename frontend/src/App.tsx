@@ -1,5 +1,5 @@
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useDropzone } from 'react-dropzone'
 import {
@@ -49,7 +49,11 @@ type TranslationResponse = {
   target_language: string
 }
 
+type SourceLanguage = 'hi' | 'mr' | 'ne'
+
 const MAX_FILE_SIZE = 10 * 1024 * 1024
+const API_TIMEOUT_MS = 120_000
+
 const ACCEPTED_TYPES = {
   'image/png': ['.png'],
   'image/jpeg': ['.jpg', '.jpeg'],
@@ -57,12 +61,21 @@ const ACCEPTED_TYPES = {
   'application/pdf': ['.pdf'],
 }
 
-function formatBytes(bytes: number) {
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+const SOURCE_LANGUAGES: { value: SourceLanguage; label: string }[] = [
+  { value: 'hi', label: 'Hindi' },
+  { value: 'mr', label: 'Marathi' },
+  { value: 'ne', label: 'Nepali' },
+]
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(0)} KB`
+  }
+
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function getErrorMessage(payload: unknown, fallback: string) {
+function getErrorMessage(payload: unknown, fallback: string): string {
   if (
     payload &&
     typeof payload === 'object' &&
@@ -71,8 +84,54 @@ function getErrorMessage(payload: unknown, fallback: string) {
   ) {
     return payload.detail
   }
+
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    'message' in payload &&
+    typeof payload.message === 'string'
+  ) {
+    return payload.message
+  }
+
   return fallback
 }
+
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs = API_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error(
+        'The request took too long. The local model may still be processing your document. Please try again.',
+        { cause: error },
+      )
+    }
+
+    if (error instanceof TypeError) {
+      throw new Error(
+        'Could not connect to the backend. Make sure the Lekha API is running.',
+        { cause: error },
+      )
+    }
+
+    throw error
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
+}
+
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null)
@@ -82,8 +141,16 @@ export default function App() {
   const [translatedText, setTranslatedText] = useState('')
   const [isRecognizing, setIsRecognizing] = useState(false)
   const [isTranslating, setIsTranslating] = useState(false)
-  const [sourceLanguage, setSourceLanguage] = useState('auto')
+  const [sourceLanguage, setSourceLanguage] = useState<SourceLanguage>('hi')
   const [activeTab, setActiveTab] = useState<'source' | 'translation'>('source')
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl)
+      }
+    }
+  }, [previewUrl])
 
   const clearFile = useCallback(() => {
     setFile(null)
@@ -91,16 +158,16 @@ export default function App() {
     setSourceText('')
     setTranslatedText('')
     setActiveTab('source')
-    setPreviewUrl((current) => {
-      if (current) URL.revokeObjectURL(current)
-      return null
-    })
+    setPreviewUrl(null)
   }, [])
 
   const onDrop = useCallback(
     (acceptedFiles: File[]) => {
       const nextFile = acceptedFiles[0]
-      if (!nextFile) return
+
+      if (!nextFile) {
+        return
+      }
 
       if (nextFile.size > MAX_FILE_SIZE) {
         toast.error('This file is too large', {
@@ -133,6 +200,7 @@ export default function App() {
     noKeyboard: true,
     onDropRejected: (rejections) => {
       const reason = rejections[0]?.errors[0]?.code
+
       if (reason === 'file-too-large') {
         toast.error('File exceeds 10 MB')
       } else {
@@ -144,8 +212,7 @@ export default function App() {
   })
 
   const recognizeDocument = async () => {
-    if (!file) {
-      toast.error('Choose a file first')
+    if (!file || isRecognizing) {
       return
     }
 
@@ -153,17 +220,18 @@ export default function App() {
     setOcrResult(null)
     setSourceText('')
     setTranslatedText('')
+    setActiveTab('source')
 
     try {
       const formData = new FormData()
       formData.append('file', file)
 
-      const response = await fetch('/api/ocr', {
+      const response = await fetchWithTimeout('/api/ocr', {
         method: 'POST',
         body: formData,
       })
 
-      const payload = await response.json().catch(() => null)
+      const payload: unknown = await response.json().catch(() => null)
 
       if (!response.ok) {
         throw new Error(
@@ -172,8 +240,13 @@ export default function App() {
       }
 
       const result = payload as OCRResponse
+
+      if (typeof result.extracted_text !== 'string') {
+        throw new Error('The backend returned an invalid OCR response.')
+      }
+
       setOcrResult(result)
-      setSourceText(result.extracted_text ?? '')
+      setSourceText(result.extracted_text)
       setActiveTab('source')
 
       if (result.warnings?.length) {
@@ -205,10 +278,14 @@ export default function App() {
       return
     }
 
+    if (isTranslating) {
+      return
+    }
+
     setIsTranslating(true)
 
     try {
-      const response = await fetch('/api/translate', {
+      const response = await fetchWithTimeout('/api/translate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -218,7 +295,7 @@ export default function App() {
         }),
       })
 
-      const payload = await response.json().catch(() => null)
+      const payload: unknown = await response.json().catch(() => null)
 
       if (!response.ok) {
         throw new Error(
@@ -227,6 +304,14 @@ export default function App() {
       }
 
       const result = payload as TranslationResponse
+
+      if (
+        typeof result.translated_text !== 'string' ||
+        !result.translated_text.trim()
+      ) {
+        throw new Error('The translation model returned an empty result.')
+      }
+
       setTranslatedText(result.translated_text)
       setActiveTab('translation')
       toast.success('Translation ready')
@@ -235,7 +320,7 @@ export default function App() {
         description:
           error instanceof Error
             ? error.message
-            : 'Check your API configuration and try again.',
+            : 'Check that the local translation model is available and try again.',
       })
     } finally {
       setIsTranslating(false)
@@ -251,12 +336,14 @@ export default function App() {
     const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
+
     link.href = url
     link.download = `lekha-${suffix}.txt`
     document.body.appendChild(link)
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
+
     toast.success('Text file downloaded')
   }
 
@@ -271,12 +358,18 @@ export default function App() {
         <div className="app-shell topbar-inner">
           <a className="brand" href="#home" aria-label="Lekha home">
             <span className="brand-mark devanagari">ल</span>
-            <span className="brand-name">lekha<span>.</span></span>
+            <span className="brand-name">
+              lekha<span>.</span>
+            </span>
           </a>
 
           <nav className="top-nav" aria-label="Main navigation">
-            <a className="nav-link active" href="#workspace">Workspace</a>
-            <a className="nav-link" href="#how-it-works">How it works</a>
+            <a className="nav-link active" href="#workspace">
+              Workspace
+            </a>
+            <a className="nav-link" href="#how-it-works">
+              How it works
+            </a>
           </nav>
 
           <div className="topbar-status">
@@ -298,18 +391,24 @@ export default function App() {
               <Sparkles size={14} />
               <span>YOUR WORDS, WITHOUT BORDERS</span>
             </div>
+
             <h1>
               Every script has
-              <br />
-              a <span className="hero-highlight">story to tell.</span>
+              <br />a <span className="hero-highlight">story to tell.</span>
             </h1>
+
             <p className="hero-description">
               Turn Devanagari documents into clear, editable text and translate
               them into English — all in one thoughtful workspace.
             </p>
+
             <div className="hero-trust">
-              <span><ShieldCheck size={15} /> You stay in control</span>
-              <span><Languages size={15} /> Devanagari to English</span>
+              <span>
+                <ShieldCheck size={15} /> You stay in control
+              </span>
+              <span>
+                <Languages size={15} /> Devanagari to English
+              </span>
             </div>
           </motion.div>
 
@@ -325,7 +424,9 @@ export default function App() {
             <span className="art-glyph glyph-one devanagari">अ</span>
             <span className="art-glyph glyph-two devanagari">क</span>
             <span className="art-glyph glyph-three devanagari">ज्ञ</span>
-            <span className="art-small-label">LANGUAGE · MEANING · CONNECTION</span>
+            <span className="art-small-label">
+              LANGUAGE · MEANING · CONNECTION
+            </span>
             <span className="art-star star-one">✳</span>
             <span className="art-star star-two">✦</span>
           </motion.div>
@@ -337,13 +438,19 @@ export default function App() {
               <span className="eyebrow">THE WORKSPACE</span>
               <h2>Bring your document to life.</h2>
             </div>
-            <span className="step-indicator"><span>01</span> Upload <i /> <span>02</span> Review <i /> <span>03</span> Translate</span>
+
+            <span className="step-indicator">
+              <span>01</span> Upload <i /> <span>02</span> Review <i />{' '}
+              <span>03</span> Translate
+            </span>
           </div>
 
           <div className="workspace-grid">
             <section className="upload-panel panel">
               <div className="panel-heading">
-                <div className="panel-icon upload-icon"><Upload size={18} /></div>
+                <div className="panel-icon upload-icon">
+                  <Upload size={18} />
+                </div>
                 <div>
                   <h3>Upload document</h3>
                   <p>Start with an image or a PDF.</p>
@@ -361,10 +468,15 @@ export default function App() {
                     <div className="file-type-icon">
                       {isPdf ? <FileText size={25} /> : <FileImage size={25} />}
                     </div>
+
                     <div className="selected-file-details">
                       <strong title={file.name}>{file.name}</strong>
-                      <span>{formatBytes(file.size)} · {isPdf ? 'PDF document' : 'Image file'}</span>
+                      <span>
+                        {formatBytes(file.size)} ·{' '}
+                        {isPdf ? 'PDF document' : 'Image file'}
+                      </span>
                     </div>
+
                     <button
                       className="icon-button remove-file"
                       type="button"
@@ -380,13 +492,23 @@ export default function App() {
                 ) : (
                   <>
                     <div className="dropzone-illustration">
-                      <div className="upload-cloud"><Upload size={23} /></div>
-                      <span className="floating-file"><FileText size={17} /></span>
+                      <div className="upload-cloud">
+                        <Upload size={23} />
+                      </div>
+                      <span className="floating-file">
+                        <FileText size={17} />
+                      </span>
                     </div>
+
                     <p className="dropzone-title">
-                      {isDragActive ? 'Drop your file here' : 'Drop your file here'}
+                      {isDragActive
+                        ? 'Drop your file here'
+                        : 'Drop your file here'}
                     </p>
-                    <p className="dropzone-subtitle">or choose one from your device</p>
+                    <p className="dropzone-subtitle">
+                      or choose one from your device
+                    </p>
+
                     <button
                       className="browse-button"
                       type="button"
@@ -409,11 +531,15 @@ export default function App() {
 
               <div className="upload-guidelines">
                 <div className="guideline-row">
-                  <span><Check size={14} /> PNG, JPG, WEBP, PDF</span>
+                  <span>
+                    <Check size={14} /> PNG, JPG, WEBP, PDF
+                  </span>
                   <span>Up to 10 MB</span>
                 </div>
                 <div className="guideline-row">
-                  <span><Check size={14} /> Printed or handwritten input</span>
+                  <span>
+                    <Check size={14} /> Printed or handwritten input
+                  </span>
                   <span>One file at a time</span>
                 </div>
               </div>
@@ -425,27 +551,39 @@ export default function App() {
                 disabled={!file || isRecognizing}
               >
                 {isRecognizing ? (
-                  <><LoaderCircle className="spin" size={18} /> Processing document…</>
+                  <>
+                    <LoaderCircle className="spin" size={18} />
+                    Processing document…
+                  </>
                 ) : (
-                  <><ScanText size={18} /> Extract text <ArrowRight size={17} /></>
+                  <>
+                    <ScanText size={18} />
+                    Extract text <ArrowRight size={17} />
+                  </>
                 )}
               </button>
 
               <p className="upload-footnote">
-                <ShieldCheck size={14} /> Files are processed by your configured backend.
+                <ShieldCheck size={14} /> Files are processed by your configured
+                backend.
               </p>
             </section>
 
             <section className="results-panel panel">
               <div className="results-top">
                 <div className="panel-heading">
-                  <div className="panel-icon results-icon"><Languages size={18} /></div>
+                  <div className="panel-icon results-icon">
+                    <Languages size={18} />
+                  </div>
                   <div>
                     <h3>Your text workspace</h3>
                     <p>Review, edit and translate your text.</p>
                   </div>
                 </div>
-                <span className="editable-tag"><span /> Editable</span>
+
+                <span className="editable-tag">
+                  <span /> Editable
+                </span>
               </div>
 
               <div className="language-toolbar">
@@ -454,7 +592,12 @@ export default function App() {
                   <span>Source text</span>
                   <ChevronDown size={14} />
                 </div>
-                <ArrowLeftRight className="language-switch-icon" size={16} />
+
+                <ArrowLeftRight
+                  className="language-switch-icon"
+                  size={16}
+                />
+
                 <div className="language-label target-language">
                   <span className="language-dot target-dot" />
                   <span>English</span>
@@ -467,16 +610,23 @@ export default function App() {
                   type="button"
                   role="tab"
                   aria-selected={activeTab === 'source'}
-                  className={activeTab === 'source' ? 'text-tab selected' : 'text-tab'}
+                  className={
+                    activeTab === 'source' ? 'text-tab selected' : 'text-tab'
+                  }
                   onClick={() => setActiveTab('source')}
                 >
                   Devanagari text
                 </button>
+
                 <button
                   type="button"
                   role="tab"
                   aria-selected={activeTab === 'translation'}
-                  className={activeTab === 'translation' ? 'text-tab selected' : 'text-tab'}
+                  className={
+                    activeTab === 'translation'
+                      ? 'text-tab selected'
+                      : 'text-tab'
+                  }
                   onClick={() => setActiveTab('translation')}
                   disabled={!translatedText}
                 >
@@ -497,11 +647,17 @@ export default function App() {
                     <textarea
                       className="text-editor devanagari"
                       value={sourceText}
-                      onChange={(event) => setSourceText(event.target.value)}
-                      placeholder={'आपका निकाला गया टेक्स्ट यहाँ दिखाई देगा…\n\nया यहाँ देवनागरी टेक्स्ट टाइप करके अनुवाद करें।'}
+                      onChange={(event) => {
+                        setSourceText(event.target.value)
+                        setTranslatedText('')
+                      }}
+                      placeholder={
+                        'आपका निकाला गया टेक्स्ट यहाँ दिखाई देगा…\n\nया यहाँ देवनागरी टेक्स्ट टाइप करके अनुवाद करें।'
+                      }
                       aria-label="Editable Devanagari source text"
                       spellCheck={false}
                     />
+
                     <div className="editor-footer">
                       <span>{sourceText.length} characters</span>
                       <button
@@ -511,6 +667,7 @@ export default function App() {
                         onClick={() => {
                           setSourceText('')
                           setTranslatedText('')
+                          setActiveTab('source')
                         }}
                       >
                         Clear text
@@ -529,12 +686,15 @@ export default function App() {
                     <div className="translation-output" aria-live="polite">
                       {translatedText}
                     </div>
+
                     <div className="editor-footer">
                       <span>{translatedText.length} characters</span>
                       <button
                         className="text-action"
                         type="button"
-                        onClick={() => downloadText(translatedText, 'translation')}
+                        onClick={() =>
+                          downloadText(translatedText, 'translation')
+                        }
                       >
                         <ArrowDownToLine size={14} /> Download
                       </button>
@@ -571,14 +731,18 @@ export default function App() {
                   <span>Source language</span>
                   <select
                     value={sourceLanguage}
-                    onChange={(event) => setSourceLanguage(event.target.value)}
+                    onChange={(event) =>
+                      setSourceLanguage(event.target.value as SourceLanguage)
+                    }
                   >
-                    <option value="auto">Auto detect</option>
-                    <option value="hi">Hindi</option>
-                    <option value="mr">Marathi</option>
-                    <option value="ne">Nepali</option>
+                    {SOURCE_LANGUAGES.map((language) => (
+                      <option key={language.value} value={language.value}>
+                        {language.label}
+                      </option>
+                    ))}
                   </select>
                 </label>
+
                 <button
                   className="primary-button translate-button"
                   type="button"
@@ -586,15 +750,23 @@ export default function App() {
                   disabled={!hasSourceText || isTranslating}
                 >
                   {isTranslating ? (
-                    <><LoaderCircle className="spin" size={17} /> Translating…</>
+                    <>
+                      <LoaderCircle className="spin" size={17} />
+                      Translating…
+                    </>
                   ) : (
-                    <><Languages size={17} /> Translate to English <ArrowRight size={16} /></>
+                    <>
+                      <Languages size={17} />
+                      Translate to English <ArrowRight size={16} />
+                    </>
                   )}
                 </button>
               </div>
 
               <div className="result-bottom-actions">
-                <span><Clock3 size={14} /> You can edit text before translating</span>
+                <span>
+                  <Clock3 size={14} /> You can edit text before translating
+                </span>
                 <button
                   className="text-action"
                   type="button"
@@ -614,24 +786,41 @@ export default function App() {
             <h2>From script to understanding.</h2>
             <p>Three simple steps. You stay in control of every word.</p>
           </div>
+
           <div className="how-grid">
             <article className="how-card">
               <span className="how-number">01</span>
-              <div className="how-icon upload-how"><Upload size={21} /></div>
+              <div className="how-icon upload-how">
+                <Upload size={21} />
+              </div>
               <h3>Bring it in</h3>
-              <p>Upload a supported image or PDF containing Devanagari text.</p>
+              <p>
+                Upload a supported image or PDF containing Devanagari text.
+              </p>
             </article>
+
             <article className="how-card">
               <span className="how-number">02</span>
-              <div className="how-icon edit-how"><ScanText size={21} /></div>
+              <div className="how-icon edit-how">
+                <ScanText size={21} />
+              </div>
               <h3>Make it yours</h3>
-              <p>Review the extracted text and correct anything before translation.</p>
+              <p>
+                Review the extracted text and correct anything before
+                translation.
+              </p>
             </article>
+
             <article className="how-card">
               <span className="how-number">03</span>
-              <div className="how-icon translate-how"><Languages size={21} /></div>
+              <div className="how-icon translate-how">
+                <Languages size={21} />
+              </div>
               <h3>Find the meaning</h3>
-              <p>Translate your reviewed text into English and export the result.</p>
+              <p>
+                Translate your reviewed text into English and export the
+                result.
+              </p>
             </article>
           </div>
         </section>
@@ -639,10 +828,14 @@ export default function App() {
         <footer className="footer">
           <a className="brand footer-brand" href="#home">
             <span className="brand-mark devanagari">ल</span>
-            <span className="brand-name">lekha<span>.</span></span>
+            <span className="brand-name">
+              lekha<span>.</span>
+            </span>
           </a>
           <p>Made for language, built for understanding.</p>
-          <a className="back-to-top" href="#home">Back to top <ArrowDown size={14} /></a>
+          <a className="back-to-top" href="#home">
+            Back to top <ArrowDown size={14} />
+          </a>
         </footer>
       </main>
     </div>

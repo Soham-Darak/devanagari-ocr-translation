@@ -1,59 +1,131 @@
 
 # Lekha — Devanagari OCR & English Translation
 
-Lekha is a web application for recognizing Devanagari characters, extracting
-text from documents, and translating reviewed text into English.
+Lekha is a web application for processing Devanagari documents, reviewing extracted text, and translating supported languages into English.
+
+## Features
+
+- Upload PNG, JPG/JPEG, WEBP, and PDF files.
+- Extract embedded text from supported PDFs.
+- Process document pages through the backend OCR pipeline.
+- Review and edit extracted text before translation.
+- Translate Hindi, Marathi, and Nepali text into English using a locally run NLLB-200 model.
+- Export source text and translated text as `.txt` files.
+- Use the FastAPI backend without a Google Translation API key.
 
 ## Technology stack
 
-- Frontend: React, TypeScript, Vite, Tailwind CSS
-- Backend: Python, FastAPI, PyTorch
-- PDF processing: PyMuPDF
-- Translation: Official Google Cloud Translation API v2
-- Testing: Pytest and frontend build/type checks
+- **Frontend:** React, TypeScript, Vite, Tailwind CSS
+- **Backend:** Python, FastAPI, PyTorch
+- **Translation:** Hugging Face Transformers and `facebook/nllb-200-distilled-600M`
+- **PDF processing:** PyMuPDF
+- **Testing:** Pytest, ESLint, TypeScript checks, and Vite production build
 
-## Important model limitation
+## Important limitations
 
-The supplied deep-learning notebook implements a 46-class character
-classifier. It does not, by itself, recognize complete words or documents.
+### OCR
 
-The application must not represent individual-character predictions as
-verified full-document OCR. Full-document recognition requires an
-additional segmentation/reconstruction pipeline or a separate OCR adapter.
+The custom CNN checkpoint is a 46-class isolated-character classifier. It is not, by itself, a full-page handwriting OCR model. Complete document recognition requires reliable character segmentation and reconstruction or a separate document OCR implementation.
+
+PDFs containing embedded text may be extractable without handwriting recognition. Do not treat a character-classification result as verified full-document OCR.
+
+### Translation
+
+- Supported source languages: Hindi (`hi`), Marathi (`mr`), and Nepali (`ne`).
+- Target language: English (`en`).
+- Automatic source-language detection is not currently enabled.
+- The first model load requires downloading several gigabytes of model files unless they are already cached.
+- CPU inference may be slow, and the model requires substantial RAM.
+- The NLLB-200 distilled model is licensed **CC-BY-NC 4.0 (non-commercial)**. Review the model's license and intended-use restrictions before commercial use.
 
 ## Prerequisites
 
-- Python 3.11
+- Python 3.11 recommended
 - Node.js and npm
 - Git
+- Sufficient disk space and RAM for the translation model
 - A compatible PyTorch installation
-- A Google Cloud project with Cloud Translation enabled for translation
 
 ## Repository layout
 
-- `backend/`: API, model adapter, PDF processing, and translation
-- `frontend/`: React web application
-- `notebooks/`: notebook integration notes
-- `PROJECT_STATUS.md`: current progress and handover context
-- `PROJECT_ARCHITECTURE.md`: system architecture
+- `backend/`: FastAPI routes, OCR and translation services, configuration, and tests
+- `frontend/`: React application
+- `notebooks/`: notebook and model integration material
+- `PROJECT_STATUS.md`: development status and next steps
+- `PROJECT_ARCHITECTURE.md`: architecture and API contracts
 
-## Model checkpoint
+## Setup
 
-Obtain `devanagari_cnn_best.pth` from the original notebook environment
-and place it at:
+### 1. Backend
+
+Open PowerShell at the repository root:
+
+```powershell
+cd backend
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+
+Place the CNN checkpoint at:
 
 `backend/models/devanagari_cnn_best.pth`
 
-Model weights are intentionally excluded from Git.
+Model weights and local environment files must not be committed.
 
-## Environment configuration
+The first translation-model load downloads `facebook/nllb-200-distilled-600M` from Hugging Face. Ensure the machine has internet access during the initial download and enough disk space for the model cache.
 
-Copy `backend/.env.example` to `backend/.env` and configure the values
-for your machine. Never commit real API keys.
+Start the API from the `backend` directory:
 
-## Development status
+```powershell
+uvicorn app.main:app --reload
+```
 
-See `PROJECT_STATUS.md` for completed milestones, blockers, and next steps.
+API documentation: `http://127.0.0.1:8000/docs`
 
-Do not consider OCR or translation operational until their real dependencies
-are configured and their tests pass.
+Health check: `http://127.0.0.1:8000/api/health`
+
+### 2. Frontend
+
+Open a second PowerShell terminal:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open the URL printed by Vite, usually `http://localhost:5173`.
+
+### 3. Configuration
+
+Backend settings are read from `backend/.env`. The frontend must not contain model credentials or private backend configuration.
+
+The default translation model is:
+
+`facebook/nllb-200-distilled-600M`
+
+The default translation device is CPU. Change it only after confirming the installed PyTorch build and hardware support the chosen device.
+
+## Testing
+
+From the `backend` directory:
+
+```powershell
+python -m pytest app/tests -v
+```
+
+From the `frontend` directory:
+
+```powershell
+npm run lint
+npm run build
+```
+
+Before committing, verify the translation endpoint with a short Hindi, Marathi, or Nepali sentence and confirm the result is returned in English.
+
+## License and model attribution
+
+The project code and the downloaded translation model may have different license terms. Check the license of each dependency and model before redistribution or commercial deployment. NLLB-200 distilled 600M is distributed under CC-BY-NC 4.0.
